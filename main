@@ -1,0 +1,371 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as graph
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+
+
+#Each Class
+
+class AnalyticsEngine:
+    
+    #I use 252 because that is the amount of days where trading on the stock market is available
+    @staticmethod
+    def calculate_cagr(historical_data, years):
+        if historical_data.empty: return np.nan
+        days = int(years * 252)
+        
+        if len(historical_data) < days: return np.nan 
+        end_val = historical_data['Close'].iloc[-1]
+        start_val = historical_data['Close'].iloc[-days]
+        
+        if start_val <= 0: return 0
+        return (end_val / start_val) ** (1 / years) - 1
+
+    @staticmethod
+    def calculate_volatility(returns):
+        return returns.std() * np.sqrt(252) if not returns.empty else 0
+
+    @staticmethod
+    def calculate_sharpe_ratio(returns):
+        if returns.empty: return 0
+        mean_return = returns.mean() * 252
+        volatility = returns.std() * np.sqrt(252)
+        return mean_return / volatility if volatility != 0 else 0
+
+# Fund class
+class Fund:
+    
+    def __init__(self, ticker):
+        self.ticker = ticker.upper()
+        self.name = ""
+        self.expense_ratio = 0.0
+        self.dividend_yield = 0.0
+        self.category = ""
+        self.benchmark_ticker = "^GSPC"
+        self.historical_data = pd.DataFrame()
+        self.benchmark_data = pd.DataFrame()
+        self.analytics = AnalyticsEngine()
+    
+    def fetch_data(self):
+        fund_obj = yf.Ticker(self.ticker)
+        info = fund_obj.info
+        if not info or 'shortName' not in info:
+            raise ValueError(f"Invalid ticker: {self.ticker}")
+
+
+        #Retrieve the information. Usually as decimals
+        self.name = info.get('shortName', self.ticker)
+        self.expense_ratio = info.get('annualReportExpenseRatio', 0.0)
+        self.dividend_yield = info.get('trailingAnnualDividendYield', 0.0) or 0.0
+        self.category = info.get('category', 'Unknown')
+        
+        if "Small" in self.category: self.benchmark_ticker = "^RUT"
+        elif any(x in self.category for x in ["Tech", "Growth", "Nasdaq"]): self.benchmark_ticker = "^IXIC"
+
+        self.historical_data = fund_obj.history(period="max")
+        self.benchmark_data = yf.Ticker(self.benchmark_ticker).history(period="1y")
+
+        if not self.historical_data.empty:
+            self.historical_data['Daily Return'] = self.historical_data['Close'].pct_change()
+            lookback = min(252, len(self.historical_data))
+            self.historical_data['Cumulative Return'] = (self.historical_data['Close'] / self.historical_data['Close'].iloc[-lookback] - 1) * 100
+        
+        if not self.benchmark_data.empty:
+            self.benchmark_data['Cumulative Return'] = (self.benchmark_data['Close'] / self.benchmark_data['Close'].iloc[0] - 1) * 100
+
+# User Interface
+class FundGUI:
+    
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Fund Tool")
+        self.root.geometry("1200x800")
+        self.root.configure(bg="#000000")
+        self.funds = {}
+
+        self.setup_styling()
+        self.create_header()
+        
+        self.main_container = tk.Frame(root, bg="#000000", padx=20, pady=10)
+        self.main_container.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = tk.Frame(self.main_container, bg="#000000")
+        input_frame.pack(fill=tk.X, pady=(0, 20))
+
+        #Get input of fund
+        tk.Label(input_frame, text="TICKER:", font=("Segoe UI", 10, "bold"), bg="#000000", fg="#00BB77").pack(side=tk.LEFT, padx=5)
+        self.ticker_entry = tk.Entry(input_frame, bg="#272727", fg="white", insertbackground="white", borderwidth=0, font=("Segoe UI", 12), width=15)
+        self.ticker_entry.pack(side=tk.LEFT, padx=5, ipady=3)
+
+
+        #Button Functions
+        ttk.Button(input_frame, text="Add Fund", command=self.add_fund).pack(side=tk.LEFT, padx=5)
+        ttk.Button(input_frame, text="Show Chart", command=self.show_chart).pack(side=tk.LEFT, padx=5)
+        ttk.Button(input_frame, text="Project Growth", command=self.project_historical_growth).pack(side=tk.LEFT, padx=5)
+        ttk.Button(input_frame, text="Compare Selected", command=self.compare_funds).pack(side=tk.LEFT, padx=5)
+        ttk.Button(input_frame, text="Clear List", command=self.clear_list).pack(side=tk.RIGHT, padx=5)
+
+        table_frame = tk.Frame(self.main_container, bg="#1a1a1a")
+        table_frame.pack(fill=tk.BOTH, expand=True)
+
+        #Fund data. Hopefully will add a full window to display full data per fund
+        columns = ("ticker","name","exp_ratio", "dividend", "1y","3y","5y","10y", "sharpe")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show='headings', selectmode="extended")
+        
+        for col in columns: 
+            text = "DIV YIELD" if col == "dividend" else col.replace("_", " ").upper()
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=100, anchor="center")
+        
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        sb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.status_var = tk.StringVar(value="System Ready")
+        status_bar = tk.Label(root, textvariable=self.status_var, bg="#292929", 
+                              fg="#888888", anchor=tk.W, padx=10, pady=5, font=("Segoe UI", 9))
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def setup_styling(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        
+        # Table Customization
+        style.configure("Treeview", background="#2d2d2d", foreground="white", 
+                        fieldbackground="#2d2d2d", rowheight=35, borderwidth=0, font=("Segoe UI", 10))
+        style.map("Treeview", background=[('selected', '#3d3d3d')], foreground=[('selected', '#00BB77')])
+        
+        style.configure("Treeview.Heading", background="#121212", foreground="#00BB77", 
+                        relief="flat", font=("Segoe UI", 10, "bold"))
+        style.map("Treeview.Heading", background=[('active', '#1e1e1e')])
+
+    def create_header(self):
+        #canvas based header with Green/Yellow
+        canvas = tk.Canvas(self.root, height=60, bg="#1e1e1e", highlightthickness=0)
+        canvas.pack(fill=tk.X)
+        
+        color1 = (0, 187, 119) # Jade
+        color2 = (255, 225, 53) # Banana
+        
+        width = 2000 # Large enough for window resizing
+        for i in range(width):
+            r = int(color1[0] + (color2[0]-color1[0]) * (i/width))
+            g = int(color1[1] + (color2[1]-color1[1]) * (i/width))
+            b = int(color1[2] + (color2[2]-color1[2]) * (i/width))
+            color = f'#{r:02x}{g:02x}{b:02x}'
+            canvas.create_line(i, 0, i, 60, fill=color)
+            
+        canvas.create_text(20, 30, text="Fund Comparison Tool", fill="white", 
+                           font=("Segoe UI", 16, "bold"), anchor="w")
+
+    def create_btn(self, parent, text, command, color):
+        # Helper to create styled "modern" buttons
+        btn = tk.Button(parent, text=text, command=command, bg="#2d2d2d", fg=color,
+                        activebackground=color, activeforeground="black",
+                        relief="flat", font=("Segoe UI", 9, "bold"), 
+                        padx=15, pady=5, cursor="hand2")
+        return btn
+
+
+    def add_fund(self):
+        ticker = self.ticker_entry.get().strip().upper()
+        if not ticker: return
+        self.status_var.set(f"Fetching {ticker}...")
+        self.root.update_idletasks()
+
+        try:
+            f = Fund(ticker)
+            f.fetch_data()
+            self.funds[f.ticker] = f
+            m = f.analytics
+            rets = f.historical_data['Daily Return'].dropna()
+            
+            # Adding data
+            self.tree.insert("", tk.END, values=(
+                f.ticker,
+                f.name,
+                f"{f.expense_ratio*100:.3f}%",
+                f"{f.dividend_yield*100:.2f}%", 
+                f"{m.calculate_cagr(f.historical_data, 1)*100:.2f}%",
+                f"{m.calculate_cagr(f.historical_data, 3)*100:.2f}%",
+                f"{m.calculate_cagr(f.historical_data, 5)*100:.2f}%",
+                f"{m.calculate_cagr(f.historical_data, 10)*100:.2f}%",
+                f"{m.calculate_sharpe_ratio(rets):.3f}"
+            ))
+            
+            self.status_var.set(f"Added {f.name}")
+            self.ticker_entry.delete(0, tk.END)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            self.status_var.set("Error fetching data")
+
+    def clear_list(self):
+        if messagebox.askyesno("Confirm", "Are you sure you want to clear all the funds?"):
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+            self.funds.clear()
+            self.status_var.set("List cleared")
+
+    def project_historical_growth(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Error", "Please select a fund")
+            return
+            
+        ticker = self.tree.item(selected[0])['values'][0]
+        fund = self.funds[ticker]
+        
+        initial_amt = simpledialog.askfloat("Input", "Initial Investment ($):", minvalue=1.0)
+        if initial_amt is None: return
+        
+        years = simpledialog.askinteger("Input", "Lookback Period (Years):", minvalue=1)
+        if years is None: return
+
+        # Get historical timeframe
+        days = int(years * 252)
+        if len(fund.historical_data) < days:
+            messagebox.showerror("Error", f"Only {len(fund.historical_data)//252} years of data available.")
+            return
+
+        # Calculate growth path based on daily returns
+        historical_slice = fund.historical_data.tail(days).copy()
+        
+        # Initializing the path: growth percentage = initial investment * (1 + cumulative daily returns)
+        historical_slice['Path'] = (1 + historical_slice['Daily Return']).cumprod() * initial_amt
+        
+        # Plotting the growth
+        fig = graph.Figure()
+        fig.add_trace(graph.Scatter(
+            x=historical_slice.index, 
+            y=historical_slice['Path'], 
+            name="Investment Value",
+            line=dict(color='#00FF88', width=2)
+        ))
+        
+        final_val = historical_slice['Path'].iloc[-1]
+        fig.update_layout(
+            title=f"Historical Growth of ${initial_amt:,.2f} over past {years}Y ({fund.ticker})",
+            yaxis_title="Portfolio Value ($)",
+            template="plotly_dark",
+            annotations=[dict(
+                x=historical_slice.index[-1], y=final_val,
+                text=f"Final: ${final_val:,.2f}", showarrow=True, arrowhead=1
+            )]
+        )
+        fig.show()
+
+    def compare_funds(self):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Error", "Select one or more funds")
+            return
+
+        # Get Inputs
+        initial_amt = simpledialog.askfloat("Investment", "Initial Investment Amount ($):", minvalue=1.0)
+        if initial_amt is None: return
+
+        years = simpledialog.askinteger("Comparison Period", "How many years back?:", minvalue=1, maxvalue=50)
+        if years is None: return
+        
+        days = int(years * 252)
+        fig = graph.Figure()
+        
+        for item in selected_items:
+            ticker = self.tree.item(item)['values'][0]
+            fund = self.funds[ticker]
+            
+            if len(fund.historical_data) < days:
+                continue
+                
+            hist = fund.historical_data.tail(days).copy()
+            
+            
+            # Math: initial investment * (daily cumulative)
+            #Use the closing price to ensure investment starts at the true investment amount
+
+            start_price = hist['Close'].iloc[0]
+            hist['Investment_Value'] = (hist['Close'] / start_price) * initial_amt
+            
+            fig.add_trace(graph.Scatter(
+                x=hist.index, 
+                y=hist['Investment_Value'], 
+                name=f"{fund.ticker}",
+                hovertemplate=f"<b>{fund.ticker}</b><br>Value: $%{{y:,.2f}}<extra></extra>"
+            ))
+
+        fig.update_layout(
+            title=f"Portfolio Growth Comparison: ${initial_amt:,.2f} over past {years} Years",
+            xaxis_title="Date",
+            yaxis_title="Portfolio Value ($)",
+            template="plotly_dark",
+            hovermode="x unified",
+            yaxis=dict(tickformat="$,"), # Format Y-axis as currency
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+        )
+        
+        if len(fig.data) == 0:
+            messagebox.showerror("Error", "Selected funds don't have enough history")
+        else:
+            fig.show()
+
+    def show_chart(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Error", "Select a fund")
+            return
+            
+        ticker = self.tree.item(selected[0])['values'][0]
+        fund = self.funds[ticker]
+        
+        #Take number of years
+        years = simpledialog.askinteger("Input", "Enter number of past years performance:", minvalue=1, maxvalue=50)
+        if years is None: return # User cancelled
+        days = int(years * 252)
+        
+        # Verify if the fund has data from that far in the past
+        if len(fund.historical_data) < days:
+            messagebox.showwarning("Data Limit", f"Only {len(fund.historical_data)//252} years of data available.")
+            days = len(fund.historical_data)
+
+        #Portion the data into that time frame
+        fund_slice = fund.historical_data.tail(days).copy()
+        
+        # Recalculate Cumulative Return for the created portion to start at 0% growth
+        start_price = fund_slice['Close'].iloc[0]
+        fund_slice['Chart_Return'] = (fund_slice['Close'] / start_price - 1) * 100
+        
+        #Pull the benchkmark data
+        bench_data = yf.Ticker(fund.benchmark_ticker).history(period=f"{years}y")
+        bench_return = (bench_data['Close'] / bench_data['Close'].iloc[0] - 1) * 100
+        fig = graph.Figure()
+        
+        fig.add_trace(graph.Scatter(
+            x=fund_slice.index, 
+            y=fund_slice['Chart_Return'], 
+            name=f"Fund: {fund.ticker}", 
+            line=dict(color="#FF00EA", width=3)
+        ))
+        
+        fig.add_trace(graph.Scatter(
+            x=bench_data.index, 
+            y=bench_return, 
+            name=f"Benchmark: {fund.benchmark_ticker}", 
+            line=dict(color="#51FF00", width=3, dash='dot')
+        ))
+        
+        fig.update_layout(
+            title=f"{years}Y Performance Comparison: {fund.name} vs {fund.benchmark_ticker}",
+            yaxis_title="Cumulative Return (%)",
+            template="plotly_dark", 
+            hovermode="x unified"
+        )
+        fig.show()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = FundGUI(root)
+    root.mainloop()
